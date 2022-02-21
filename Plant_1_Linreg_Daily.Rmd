@@ -1,0 +1,255 @@
+---
+title: "Plant_1_Linreg_Daily"
+author: "tanchuanxin"
+date: "11/1/2021"
+output: html_document
+---
+
+<h1>Setup</h1>
+We will perform the necessary imports, and change the working directory based on the user 
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(rpart)
+library(rpart.plot)
+library(car)
+library(corrplot)
+library(tidyverse)
+library(caTools)
+library(ggplot2)
+library(lubridate)
+library(TTR)
+library(tsbox)
+
+
+
+
+# setwd("C:/Users/matth/Desktop/Course Materials for Stu/AY21 Team Assignment and Project") 
+setwd("C:/Users/user/Documents/Github/project-MAI") # chuanxin's wd
+set.seed(2021)
+seed = 2021
+# load dataset
+plant_1.dt <- fread("Plant_1_Data.csv")
+
+# convert some features into factors where relevant
+plant_1.dt$SOURCE_KEY <- factor(plant_1.dt$SOURCE_KEY)
+plant_1.dt$DOTW <- factor(plant_1.dt$DOTW)
+plant_1.dt$TIME <- factor(plant_1.dt$TIME)
+plant_1.dt$DATE <- factor(plant_1.dt$DATE)
+
+head(plant_1.dt)
+
+```
+
+
+<h1>Load in the data</h1>
+Perform some cleaning on the data 
+
+```{r cleaning}
+# remove some of the extra features that we have
+linreg_daily_yield.dt <- subset(plant_1.dt, select = -c(TIME, PLANT_ID, DOTW, DATE_TIME, PERIOD_YIELD, TOTAL_YIELD, DC_POWER, AC_POWER))
+
+head(linreg_daily_yield.dt)
+
+# get the mean values across most columns
+linreg_daily_yield.dt1 <- linreg_daily_yield.dt %>%
+  group_by(SOURCE_KEY, DATE) %>%
+    summarise(across(AMBIENT_TEMPERATURE:`Rainfall (kg/m2)`, mean))
+
+# get the max values of daily yield (this is the true daily yield)
+linreg_daily_yield.dt2 <- linreg_daily_yield.dt %>%
+  group_by(SOURCE_KEY, DATE) %>%
+    summarise(across(DAILY_YIELD, max))
+
+# concat and remove date
+linreg_daily_yield.dt <- merge(linreg_daily_yield.dt1, linreg_daily_yield.dt2, by=c("SOURCE_KEY", "DATE"), all = T)
+
+linreg_daily_yield.dt <- subset(linreg_daily_yield.dt, select = -c(DATE))
+
+# check if correct
+dim(linreg_daily_yield.dt1)
+head(linreg_daily_yield.dt1)
+dim(linreg_daily_yield.dt2)
+head(linreg_daily_yield.dt2)
+dim(linreg_daily_yield.dt)
+head(linreg_daily_yield.dt)
+```
+
+<h1>Removing correlated variables</h1>
+
+``` {r lin_reg_model_all}
+M = cor(subset(linreg_daily_yield.dt, select = -c(DAILY_YIELD, SOURCE_KEY)))
+corrplot(M, method = "number")
+# We discover that MODULE_TEMPERATURE is very highly correlated with both AMBIENT_TEMPERATURE and IRRADIATION, while `Relative Humidity (%)` and `Rainfall (kg/m2)` are also highly correlated
+
+
+m1 <- lm(DAILY_YIELD ~ .-SOURCE_KEY, data = linreg_daily_yield.dt)
+summary(m1)
+vif(m1)
+# we see that MODULE_TEMPERATURE has the highest VIF value of 27.6 > 10, we try and exclude that first
+
+m2 <- lm(DAILY_YIELD ~ .-SOURCE_KEY -MODULE_TEMPERATURE, data = linreg_daily_yield.dt)
+summary(m2)
+vif(m2)
+# now all the VIF values are <10
+
+
+
+# With selected features, develop model on trainset
+train <- sample.split(Y = linreg_daily_yield.dt$DAILY_YIELD, SplitRatio = 0.7)
+trainset <- subset(linreg_daily_yield.dt, train == T)
+testset <- subset(linreg_daily_yield.dt, train == F)
+
+# Checking the distribution of Y is similar in trainset vs testset.
+summary(trainset$DAILY_YIELD)
+summary(testset$DAILY_YIELD)
+# yes, similar enough
+
+# create model
+m3 <- lm(DAILY_YIELD ~ .-SOURCE_KEY -MODULE_TEMPERATURE, data = trainset)
+summary(m3)
+# residuals(m3)
+
+# we see that AMBIENT_TEMPERATURE, `Relative Humidity (%)` and `Pressure (hPa)` are not statistically significant , we will create another model without these variables 
+
+m4 <- lm(DAILY_YIELD ~ .-SOURCE_KEY -MODULE_TEMPERATURE -AMBIENT_TEMPERATURE -`Relative Humidity (%)` -`Pressure (hPa)`, data = trainset)
+summary(m4)
+# residuals(m4)
+
+# Residuals = Error = Actual - Model Predicted
+RMSE.m4.train <- sqrt(mean(residuals(m4)^2))  # RMSE on trainset based on m4 model.
+summary(abs(residuals(m4)))  # Check Min Abs Error and Max Abs Error.
+
+# Apply model from trainset to predict on testset.
+predict.m4.test <- predict(m4, newdata = testset)
+testset.error <- testset$DAILY_YIELD - predict.m4.test
+
+# Testset Errors
+RMSE.m4.test <- sqrt(mean(testset.error^2))
+summary(abs(testset.error))
+
+# mean testset error is 365.75      
+```
+
+<h1>Check by individual SOURCE_KEY</h1>
+The full datasets consists of many panels, and when different data are brought together, it might display some characteristics that were otherwise not present. We will look at each of the panels individually to see if we find anything interesting
+
+``` {r lin_reg_model_by_source_key}
+for (level in levels(linreg_daily_yield.dt$SOURCE_KEY)) {
+  source_key_DAILY_YIELD.dt <- filter(linreg_daily_yield.dt, SOURCE_KEY==level) %>%
+    subset(, -c(SOURCE_KEY))
+
+  m5 <- lm(DAILY_YIELD ~ . -MODULE_TEMPERATURE, data = source_key_DAILY_YIELD.dt)
+  paste("levels: ", as.character(level))
+  print(summary(m5))
+  print(vif(m5))
+}
+
+
+```
+
+<h1>Removing features</h1> 
+We see that when considering individual inverters, what stands out is that only one variable is consistently highly significant: IRRADIATION... the rest other variables can be considered for removal
+
+We will remove rainfall first, which shows the least statistically significant result
+
+From before, we know that we should already exclude MODULE_TEMPERATURE, AMBIENT_TEMPERATURE, `Relative Humidity (%)` and `Pressure (hPa)` from the model
+
+``` {r remove_rainfall}
+# find a smaller subset of data - we can remove rainfall, since it is the least significant out of all the variables 
+linreg_DAILY_YIELD_selected.dt <- subset(linreg_daily_yield.dt, select = -c(MODULE_TEMPERATURE, AMBIENT_TEMPERATURE, `Relative Humidity (%)`, `Pressure (hPa)`, `Rainfall (kg/m2)`))
+
+# With selected features, develop model on trainset
+train <- sample.split(Y = linreg_DAILY_YIELD_selected.dt$DAILY_YIELD, SplitRatio = 0.7)
+trainset <- subset(linreg_DAILY_YIELD_selected.dt, train == T)
+testset <- subset(linreg_DAILY_YIELD_selected.dt, train == F)
+
+# Checking the distribution of Y is similar in trainset vs testset.
+summary(trainset$DAILY_YIELD)
+summary(testset$DAILY_YIELD)
+# yes, similar enough 
+
+# create model
+m6 <- lm(DAILY_YIELD ~ .-SOURCE_KEY, data = trainset)
+summary(m6)
+# residuals(m6)
+
+# Residuals = Error = Actual - Model Predicted
+RMSE.m6.train <- sqrt(mean(residuals(m6)^2))  # RMSE on trainset based on m6 model.
+summary(abs(residuals(m6)))  # Check Min Abs Error and Max Abs Error.
+
+# Apply model from trainset to predict on testset.
+predict.m6.test <- predict(m6, newdata = testset)
+testset.error <- testset$DAILY_YIELD - predict.m6.test
+
+# Testset Errors
+RMSE.m6.test <- sqrt(mean(testset.error^2))
+summary(abs(testset.error))
+
+# mean testset error is 326.852  -- an improvement from 365.75 
+
+```
+
+After removing rainfall, we will try to remove wind direction can
+
+``` {r remove_wind_direction}
+# find a smaller subset of data - we can remove wind_direction, since it is the least significant out of all the variables 
+linreg_DAILY_YIELD_selected.dt <- subset(linreg_daily_yield.dt, select = -c(MODULE_TEMPERATURE, AMBIENT_TEMPERATURE, `Relative Humidity (%)`, `Pressure (hPa)`, `Rainfall (kg/m2)`, `Wind direction`))
+
+# With selected features, develop model on trainset
+train <- sample.split(Y = linreg_DAILY_YIELD_selected.dt$DAILY_YIELD, SplitRatio = 0.7)
+trainset <- subset(linreg_DAILY_YIELD_selected.dt, train == T)
+testset <- subset(linreg_DAILY_YIELD_selected.dt, train == F)
+
+# Checking the distribution of Y is similar in trainset vs testset.
+summary(trainset$DAILY_YIELD)
+summary(testset$DAILY_YIELD)
+# yes, similar enough 
+
+# create model
+m7 <- lm(DAILY_YIELD ~ .-SOURCE_KEY, data = trainset)
+summary(m7)
+# residuals(m7)
+
+# Residuals = Error = Actual - Model Predicted
+RMSE.m7.train <- sqrt(mean(residuals(m7)^2))  # RMSE on trainset based on m7 model.
+summary(abs(residuals(m7)))  # Check Min Abs Error and Max Abs Error.
+
+# Apply model from trainset to predict on testset.
+predict.m7.test <- predict(m7, newdata = testset)
+testset.error <- testset$DAILY_YIELD - predict.m7.test
+
+# Testset Errors
+RMSE.m7.test <- sqrt(mean(testset.error^2))
+summary(abs(testset.error))
+
+# mean testset error is 375.354 -- worse than 326.852  
+
+```
+
+The other features are now all extremely statistically important, so we will not remove any more features. We are left with only IRRADIATION and `Wind speed (m/s)`
+
+
+
+<h1>Dummy variables</h1>
+We will investigate if certain dummy variables will be useful in helping us predict the generative capacity of the solar panels. We will build off of the reduced feature set while introducing some features that were removed.
+
+What we have are the following factors that we will use dummy variables for 
+1. SOURCE_KEY
+    This will indicate if one solar panel is better or worse than the baseline 
+
+``` {r linreg_dummy_var}
+linreg_DAILY_YIELD_enhanced.dt <- linreg_DAILY_YIELD_selected.dt
+
+# according to alphabetical order, so we already have time-ordered from earliest to latest
+# does not matter which source is the baseline
+levels(linreg_DAILY_YIELD_enhanced.dt$SOURCE_KEY)
+
+m8 <- lm(DAILY_YIELD ~ ., data = linreg_DAILY_YIELD_enhanced.dt)
+summary(m8)
+
+
+```
+
+

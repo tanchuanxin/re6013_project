@@ -1,0 +1,106 @@
+---
+title: "Plant_1_CART_Daily"
+author: "tanchuanxin"
+date: "11/1/2021"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(rpart)
+library(rpart.plot)
+library(car)
+library(corrplot)
+library(tidyverse)
+library(caTools)
+
+
+
+# setwd("C:/Users/matth/Desktop/Course Materials for Stu/AY21 Team Assignment and Project") 
+setwd("C:/Users/user/Documents/Github/project-MAI") # chuanxin's wd
+set.seed(2021)
+seed = 2021
+
+# load dataset
+plant_1.dt <- fread("Plant_1_Data.csv")
+
+# convert some features into factors where relevant
+plant_1.dt$SOURCE_KEY <- factor(plant_1.dt$SOURCE_KEY)
+plant_1.dt$DOTW <- factor(plant_1.dt$DOTW)
+plant_1.dt$TIME <- factor(plant_1.dt$TIME)
+plant_1.dt$DATE <- factor(plant_1.dt$DATE)
+
+```
+
+
+
+
+``` {r cleaning}
+# remove some of the extra features that we have
+cart_daily_yield.dt <- subset(plant_1.dt, select = -c(PLANT_ID, DOTW, DATE_TIME, TIME, PERIOD_YIELD, TOTAL_YIELD, DC_POWER, AC_POWER))
+
+summary(cart_daily_yield.dt)
+
+head(cart_daily_yield.dt)
+
+# get the mean values across all continuous variables except daily yield
+cart_daily_yield.dt1 <- cart_daily_yield.dt %>%
+  group_by(SOURCE_KEY, DATE) %>%
+    summarise(across(AMBIENT_TEMPERATURE:`Rainfall (kg/m2)`, mean))
+
+# get the max values of daily yield (this is the true daily yield)
+cart_daily_yield.dt2 <- cart_daily_yield.dt %>%
+  group_by(SOURCE_KEY, DATE) %>%
+    summarise(across(DAILY_YIELD, max))
+
+# concat and remove date
+cart_daily_yield.dt <- merge(cart_daily_yield.dt1, cart_daily_yield.dt2, by=c("SOURCE_KEY", "DATE"), all = T)
+
+cart_daily_yield.dt <- subset(cart_daily_yield.dt, select = -c(DATE))
+
+# check if correct
+dim(cart_daily_yield.dt1)
+head(cart_daily_yield.dt1)
+dim(cart_daily_yield.dt2)
+head(cart_daily_yield.dt2)
+dim(cart_daily_yield.dt)
+head(cart_daily_yield.dt)
+
+
+```
+
+
+``` {r cart}
+# cart.dt <- select(cart_daily_yield.dt, c(DAILY_YIELD, IRRADIATION, 'Wind speed (m/s)'))
+
+cart.dt <- subset(cart_daily_yield.dt, select = -c(SOURCE_KEY))
+
+cart1 <- rpart(DAILY_YIELD ~ ., data = cart.dt, method = 'anova', control = rpart.control(minsplit = 2, cp = 0))
+# printcp(cart1, digits = 3)
+plotcp(cart1)
+
+# min cp + 1 stddev
+CVerror.cap <- cart1$cptable[which.min(cart1$cptable[,"xerror"]), "xerror"] +  cart1$cptable[which.min(cart1$cptable[,"xerror"]), "xstd"]
+
+# Find the optimal CP region whose CV error is just below CVerror.cap in maximal tree cart1.
+i <- 1; j<- 4
+while (cart1$cptable[i,j] > CVerror.cap) {
+  i <- i + 1
+}
+cp1 = ifelse(i > 1, sqrt(cart1$cptable[i,1] * cart1$cptable[i-1,1]), 1)
+
+cart2 <- prune(cart1, cp = cp1)
+printcp(cart2, digits = 3)
+
+# Root node error: 6.07e+08/616 = 986059
+# cart2 trainset MSE = 0.131 * 986059 = 129174
+# cart2 CV MSE = 0.140 * 986059 = 138048
+
+
+rpart.plot(cart2, nn = T, main = "Optimal Tree")
+## The number inside each node represent the mean value of Y.
+
+cart2$variable.importance
+```
+
